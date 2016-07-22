@@ -669,6 +669,7 @@ sub setupBootloader__grub2 {
 sub get_autologin() {
     my %desktop = getVarsFromSh("$::prefix/etc/sysconfig/desktop");
     my $gdm_file = "$::prefix/etc/X11/gdm/custom.conf";
+    my $sddm_file = "$::prefix/etc/sddm.conf";
     my $kdm_file = common::read_alternative('kdm4-config');
     my $lightdm_conffile = "$::prefix/etc/lightdm/lightdm.conf.d/50-blackPanther-autologin.conf";
     my $autologin_file = "$::prefix/etc/sysconfig/autologin";
@@ -676,12 +677,14 @@ sub get_autologin() {
     my %desktop_to_dm = (
         GNOME => 'gdm',
         KDE4 => 'kdm',
+        KDE => 'sddm',
+        Plasma => 'sddm',
         xfce4 => 'lightdm',
         LXDE => 'lxdm',
     );
     my %dm_canonical = (
         gnome => 'gdm',
-        kde => 'kdm',
+        kde => 'sddm',
     );
     my $dm =
       lc($desktop{DISPLAYMANAGER}) ||
@@ -693,6 +696,9 @@ sub get_autologin() {
     if ($dm eq "gdm") {
         my %conf = read_gnomekderc($gdm_file, 'daemon');
         $autologin_user = text2bool($conf{AutomaticLoginEnable}) && $conf{AutomaticLogin};
+    } elsif ($dm eq "sddm") {
+        my %conf = read_gnomekderc($sddm_file, 'Autologin');
+        $autologin_user = text2bool($conf{Autologin}) && $conf{"User"};
     } elsif ($dm eq "kdm") {
         my %conf = read_gnomekderc($kdm_file, 'X-:0-Core');
         $autologin_user = text2bool($conf{AutoLoginEnable}) && $conf{AutoLoginUser};
@@ -726,11 +732,6 @@ sub set_autologin {
     }
 
     #- Configure KDM / MDKKDM
-    my $kdm_conffile = common::read_alternative('kdm4-config');
-    eval { common::update_gnomekderc_no_create($kdm_conffile, 'X-:0-Core' => (
-	AutoLoginEnable => $do_autologin,
-	AutoLoginUser => $autologin->{user},
-    )) } if -e $kdm_conffile;
 
     #- Configure GDM
     my $gdm_conffile = "$::prefix/etc/X11/gdm/custom.conf";
@@ -745,6 +746,39 @@ sub set_autologin {
 	'#dummy-autologin' => $do_autologin,
 	'autologin-user' => $autologin->{user}
     )) } if -e $lightdm_conffile;
+
+    #- Configure SDDM
+    my $sddm_conffile = "$::prefix/etc/sddm.conf";
+    eval { if ($autologin->{user}) {
+	my $xsessions_dir = "$::prefix/usr/share/xsessions";
+	my $xsession_file = $autologin->{desktop};
+	if ($xsession_file && $xsession_file ne 'default' && $xsession_file ne 'failsafe' && opendir (DIR, $xsessions_dir)) {
+	    while (my $xsessions_file = readdir(DIR)) {
+		next if ($xsessions_file =~ m/^\./);
+		my %xsession = read_gnomekderc($xsessions_dir . '/' . $xsessions_file, 'Desktop Entry');
+		if ($xsession{"Name"} eq $autologin->{desktop}) {
+		    $xsession_file = $xsessions_file;
+		    last;
+		}
+	    }
+	    closedir(DIR);
+	}
+	update_gnomekderc($sddm_conffile, 'Autologin' => (
+	'User' => $autologin->{user},
+	'Session' => $xsession_file
+    ))
+
+    } else {
+	update_gnomekderc($sddm_conffile, 'Autologin' => (
+	'User' => '',
+	'Session' => ''
+    )) } } if -e $sddm_conffile;
+
+    my $kdm_conffile = common::read_alternative('kdm4-config');
+    eval { common::update_gnomekderc_no_create($kdm_conffile, 'X-:0-Core' => (
+	AutoLoginEnable => $do_autologin,
+	AutoLoginUser => $autologin->{user},
+    )) } if -e $kdm_conffile;
 
     my $xdm_autologin_cfg = "$::prefix/etc/sysconfig/autologin";
     # TODO: configure lxdm in /etx/lxdm/lxdm.conf
@@ -771,9 +805,27 @@ sub set_window_manager {
     log::l("set_window_manager $home $wm");
     my $p_home = "$::prefix$home";
 
-    #- for KDM/GDM
-    my $wm_number = sessions_with_order()->{$wm} || '';
-    update_gnomekderc("$p_home/.dmrc", 'Desktop', Session => "$wm_number$wm");
+
+ #- for KDM/GDM
+     my $wm_number = sessions_with_order()->{$wm} || '';
+-    update_gnomekderc("$p_home/.dmrc", 'Desktop', Session => "$wm_number$wm");
+    my $xsessions_dir = "$::prefix/usr/share/xsessions";
+    my $xsession_file = $wm;
+    if (opendir (DIR, $xsessions_dir)) {
+	while (my $xsessions_file = readdir(DIR)) {
+	    next if ($xsessions_file =~ m/^\./);
+		my %xsession = read_gnomekderc($xsessions_dir . '/' . $xsessions_file, 'Desktop Entry');
+		if ($xsession{"Name"} eq $wm) {
+		    $xsession_file = $xsessions_file;
+		    $xsession_file =~ s{\.[^.]+$}{};
+		    last;
+		}
+	}
+    }
+    update_gnomekderc("$p_home/.dmrc", 'Desktop', Session => "$xsession_file");
+    my $user = find { $home eq $_->[7] } list_passwd();
+    chown($user->[2], $user->[3], "$p_home/.dmrc");
+    chmod(0644, "$p_home/.dmrc");
     my $user = find { $home eq $_->[7] } list_passwd();
     chown($user->[2], $user->[3], "$p_home/.dmrc");
     chmod(0644, "$p_home/.dmrc");
